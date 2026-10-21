@@ -8,15 +8,12 @@ import permService from '../service/perm-service';
 import { t } from '../i18n/i18n'
 import app from '../hono/hono';
 import { getCookie, setCookie } from 'hono/cookie';
+import { bodyLimit } from 'hono/body-limit';
 
 const exclude = [
 	'/login',
 	'/register',
 	'/setting/websiteConfig',
-	'/webhooks',
-	'/init',
-	'/telegram',
-	'/test',
 	'/oauth'
 ];
 
@@ -89,10 +86,32 @@ const premKey = {
 	'reg-key:delete': ['/regKey/delete','/regKey/clearNotUse'],
 };
 
+app.use('/login', bodyLimit({ maxSize: 8192 }));
+app.use('/register', bodyLimit({ maxSize: 8192 }));
 app.use('*', async (c, next) => {
 
 	const path = c.req.path;
 	const matches = (prefix) => path === prefix || path.startsWith(prefix + '/');
+	if (matches('/init')) return c.notFound();
+	if (c.req.method === 'POST' && (path === '/login' || path === '/register')) {
+		if (!c.env.AUTH_IP_LIMITER || !c.env.AUTH_ACCOUNT_LIMITER) throw new BizError('Authentication temporarily unavailable', 503);
+		const ip = c.req.header('CF-Connecting-IP') || 'unknown';
+		if (!(await c.env.AUTH_IP_LIMITER.limit({ key: 'auth-ip:' + ip })).success) {
+			c.header('Retry-After', '60');
+			throw new BizError('Too many attempts; retry in one minute', 429);
+		}
+		let body;
+		try { body = await c.req.json(); } catch { throw new BizError('Invalid request', 400); }
+		if (typeof body?.email !== 'string' || body.email.length > 254) throw new BizError('Invalid request', 400);
+		// ponytail: native counters are approximate per Cloudflare location; use Durable Objects for strict global limits.
+		const email = body.email.trim().toLowerCase();
+		if (!(await c.env.AUTH_ACCOUNT_LIMITER.limit({ key: 'auth-account:' + email })).success) {
+			c.header('Retry-After', '60');
+			throw new BizError('Too many attempts; retry in one minute', 429);
+		}
+	}
+	if (path === '/webhooks' && c.req.method === 'POST') return next();
+	if (/^\/telegram\/getEmail\/[^/]+$/.test(path) && c.req.method === 'GET') return next();
 	const objectRequest = matches('/oss');
 	if (objectRequest && /^\/oss\/static\/background\/[a-zA-Z0-9_-]+\.[a-zA-Z0-9]+$/.test(path)) {
 		return next();

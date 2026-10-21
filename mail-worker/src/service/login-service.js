@@ -83,11 +83,11 @@ const loginService = {
 		const accountRow = await accountService.selectByEmailIncludeDel(c, email);
 
 		if (accountRow && accountRow.isDel === isDel.DELETE) {
-			throw new BizError(t('isDelUser'));
+			throw new BizError('无法使用所提供的信息完成注册', 400);
 		}
 
 		if (accountRow) {
-			throw new BizError(t('isRegAccount'));
+			throw new BizError('无法使用所提供的信息完成注册', 400);
 		}
 
 		let defType = null
@@ -201,28 +201,21 @@ const loginService = {
 
 	async login(c, params, noVerifyPwd = false) {
 
-		const { email, password } = params;
+		const password = params.password;
+		const email = typeof params.email === 'string' ? params.email.trim().toLowerCase() : '';
 
-		if ((!email || !password) && !noVerifyPwd) {
-			throw new BizError(t('emailAndPwdEmpty'));
+		if (!email || email.length > 254 || (!noVerifyPwd && (typeof password !== 'string' || !password || password.length > 128))) {
+			throw new BizError('邮箱或密码错误', 401);
 		}
 
 		const userRow = await userService.selectByEmailIncludeDel(c, email);
 
-		if (!userRow) {
-			throw new BizError(t('notExistUser'));
+		if (!noVerifyPwd && (!userRow || !userRow.password.startsWith('pbkdf2-sha256$'))) {
+			await cryptoUtils.verifyPassword(password, 'login-dummy-salt', 'pbkdf2-sha256$100000$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
 		}
-
-		if(userRow.isDel === isDel.DELETE) {
-			throw new BizError(t('isDelUser'));
-		}
-
-		if(userRow.status === userConst.status.BAN) {
-			throw new BizError(t('isBanUser'));
-		}
-
-		if (!await cryptoUtils.verifyPassword(password, userRow.salt, userRow.password) && !noVerifyPwd) {
-			throw new BizError(t('IncorrectPwd'));
+		const validPassword = noVerifyPwd || (userRow && await cryptoUtils.verifyPassword(password, userRow.salt, userRow.password));
+		if (!userRow || userRow.isDel === isDel.DELETE || userRow.status === userConst.status.BAN || !validPassword) {
+			throw new BizError('邮箱或密码错误', 401);
 		}
 		if (!noVerifyPwd && !userRow.password.startsWith('pbkdf2-sha256$')) {
 			await userService.resetPassword(c, { password }, userRow.userId);

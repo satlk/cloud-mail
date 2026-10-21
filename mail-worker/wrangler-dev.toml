@@ -3,6 +3,16 @@ main = "src/index.js"
 compatibility_date = "2025-06-04"
 keep_vars = true
 
+[[ratelimits]]
+name = "AUTH_IP_LIMITER"
+namespace_id = "731011"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_ACCOUNT_LIMITER"
+namespace_id = "731012"
+simple = { limit = 10, period = 60 }
+
 [observability]
 enabled = true
 

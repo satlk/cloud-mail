@@ -5,6 +5,10 @@ import BizError from '../error/biz-error';
 const resendService = {
 
 	async webhooks(c, body) {
+		const events = ['email.sent', 'email.delivered', 'email.complained', 'email.bounced', 'email.delivery_delayed', 'email.failed'];
+		if (!body || !events.includes(body.type)) return;
+		if (typeof body.data?.email_id !== 'string' || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(body.data.email_id)) throw new BizError('Invalid webhook event', 400);
+		if (body.type === 'email.failed' && (typeof body.data.failed?.reason !== 'string' || body.data.failed.reason.length > 4096)) throw new BizError('Invalid webhook event', 400);
 
 		const params = {
 			resendEmailId: body.data.email_id,

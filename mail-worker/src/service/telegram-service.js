@@ -7,7 +7,6 @@ import timezone from 'dayjs/plugin/timezone';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 import { eq } from 'drizzle-orm';
-import jwtUtils from '../utils/jwt-utils';
 import emailMsgTemplate from '../template/email-msg';
 import emailTextTemplate from '../template/email-text';
 import emailHtmlTemplate from '../template/email-html';
@@ -20,15 +19,14 @@ const telegramService = {
 
 		const { token } = params
 
-		const result = await jwtUtils.verifyToken(c, token);
+		if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(token)) return null;
+		const result = await c.env.kv.get('telegram-email:' + token, { type: 'json' });
 
-		if (!result) {
-			return emailTextTemplate('Access denied')
-		}
+		if (!result || !Number.isSafeInteger(result.emailId) || result.expiresAt <= Date.now() || !Number.isFinite(result.expiresAt)) return null;
 
 		const emailRow = await orm(c).select().from(email).where(eq(email.emailId, result.emailId)).get();
 
-		if (emailRow) {
+		if (emailRow && emailRow.isDel === 0) {
 
 			if (emailRow.content) {
 				const { r2Domain } = await settingService.query(c);
@@ -38,7 +36,7 @@ const telegramService = {
 			}
 
 		} else {
-			return emailTextTemplate('The email does not exist')
+			return null;
 		}
 
 	},
@@ -49,7 +47,8 @@ const telegramService = {
 
 		const tgChatIds = tgChatId.split(',');
 
-		const jwtToken = await jwtUtils.generateToken(c, { emailId: email.emailId })
+		const jwtToken = crypto.randomUUID();
+		await c.env.kv.put('telegram-email:' + jwtToken, JSON.stringify({ emailId: email.emailId, expiresAt: Date.now() + 900000 }), { expirationTtl: 900 });
 
 		const webAppUrl = customDomain ? `${domainUtils.toOssDomain(customDomain)}/api/telegram/getEmail/${jwtToken}` : 'https://www.cloudflare.com/404'
 		const inlineKeyboard = [

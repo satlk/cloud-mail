@@ -8,11 +8,18 @@ import storage from '../src/service/r2-service';
 import permissions from '../src/service/perm-service';
 import roles from '../src/service/role-service';
 import publicService from '../src/service/public-service';
+import emailService from '../src/service/email-service';
+import loginService from '../src/service/login-service';
+import userService from '../src/service/user-service';
+import { createHmac } from 'node:crypto';
 
 const values = new Map();
 const sqlite = new DatabaseSync(':memory:');
 const env = {
   admin: 'admin@example.test', jwt_secret: 'isolated-test-secret', domain: ['example.test'],
+  AUTH_IP_LIMITER: { async limit() { return { success: true }; } },
+  AUTH_ACCOUNT_LIMITER: { async limit() { return { success: true }; } },
+  RESEND_WEBHOOK_SECRET: 'whsec_' + Buffer.from('isolated-webhook-test-secret').toString('base64'),
   kv: {
     async put(key, value) { values.set(key, value); },
     async get(key, options) { const value = values.get(key) ?? null; return value && options?.type === 'json' ? JSON.parse(value) : value; },
@@ -106,5 +113,70 @@ describe('security regression', () => {
   it('rejects tokens from a previous session generation', async () => {
     const token = await session();
     expect(await jwt.verifyToken({ env: { ...env, session_version: 'rotated-generation' } }, token)).toBeNull();
+  });
+  it('closes initialization even with the real root secret', async () => {
+    const prepare = vi.spyOn(env.db, 'prepare');
+    for (const path of ['/api/init/wrong', '/api/init/' + env.jwt_secret]) expect((await fetch(path)).status).toBe(404);
+    expect(prepare).not.toHaveBeenCalled();
+  });
+  it('rejects session JWTs and expired Telegram capabilities without querying emails', async () => {
+    const prepare = vi.spyOn(env.db, 'prepare');
+    const signed = await jwt.generateToken({ env }, { emailId: 1 });
+    const response = await fetch('/api/telegram/getEmail/' + signed);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    const token = crypto.randomUUID();
+    await env.kv.put('telegram-email:' + token, JSON.stringify({ emailId: 1, expiresAt: Date.now() - 1 }));
+    expect((await fetch('/api/telegram/getEmail/' + token)).status).toBe(404);
+    expect(prepare).not.toHaveBeenCalled();
+  });
+  it('rate limits auth by trusted source and normalized account before login work', async () => {
+    const ip = vi.spyOn(env.AUTH_IP_LIMITER, 'limit').mockResolvedValue({ success: false });
+    let response = await fetch('/api/login', { method: 'POST', body: '{}' });
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe('60');
+    ip.mockResolvedValue({ success: true });
+    const account = vi.spyOn(env.AUTH_ACCOUNT_LIMITER, 'limit').mockResolvedValue({ success: false });
+    response = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ email: ' USER@Example.TEST ', password: 'wrong' }) });
+    expect(response.status).toBe(429);
+    expect(account).toHaveBeenCalledWith({ key: 'auth-account:user@example.test' });
+    expect((await fetch('/api/register', { method: 'POST', body: JSON.stringify({ email: 'user@example.test', password: 'test-password' }) })).status).toBe(429);
+  });
+  it('returns the same failure for nonexistent accounts and wrong passwords', async () => {
+    const lookup = vi.spyOn(userService, 'selectByEmailIncludeDel').mockResolvedValue(null);
+    await expect(loginService.login({ env }, { email: 'user@example.test', password: 'wrong' })).rejects.toMatchObject({ code: 401, message: '邮箱或密码错误' });
+    const { salt, hash } = await passwords.hashPassword('test-password');
+    lookup.mockResolvedValue({ userId: 7, email: 'user@example.test', salt, password: hash, isDel: 0, status: 0 });
+    await expect(loginService.login({ env }, { email: 'user@example.test', password: 'wrong' })).rejects.toMatchObject({ code: 401, message: '邮箱或密码错误' });
+  });
+  it('verifies raw-body webhook signatures and timestamp before writes', async () => {
+    const update = vi.spyOn(emailService, 'updateEmailStatus').mockResolvedValue({ emailId: 1 });
+    const payload = JSON.stringify({ type: 'email.delivered', data: { email_id: crypto.randomUUID() } });
+    const id = 'msg_security_test';
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const secret = Buffer.from(env.RESEND_WEBHOOK_SECRET.slice(6), 'base64');
+    const signature = 'v1,' + createHmac('sha256', secret).update(id + '.' + timestamp + '.' + payload).digest('base64');
+    const headers = { 'Content-Type': 'application/json', 'svix-id': id, 'svix-timestamp': timestamp, 'svix-signature': signature };
+    expect((await fetch('/api/webhooks', { method: 'POST', body: payload, headers: { 'Content-Type': 'application/json' } })).status).toBe(401);
+    expect(update).not.toHaveBeenCalled();
+    expect((await fetch('/api/webhooks', { method: 'POST', body: payload + ' ', headers })).status).toBe(401);
+    const stale = String(Number(timestamp) - 601);
+    const staleSignature = 'v1,' + createHmac('sha256', secret).update(id + '.' + stale + '.' + payload).digest('base64');
+    expect((await fetch('/api/webhooks', { method: 'POST', body: payload, headers: { ...headers, 'svix-timestamp': stale, 'svix-signature': staleSignature } })).status).toBe(401);
+    expect(update).not.toHaveBeenCalled();
+    expect((await fetch('/api/webhooks', { method: 'POST', body: payload, headers })).status).toBe(200);
+    expect(update).toHaveBeenCalledOnce();
+  });
+  it('fails closed when auth or webhook security configuration is missing', async () => {
+    const noLimit = await worker.fetch(request('/api/login', { method: 'POST', body: '{}' }), { ...env, AUTH_ACCOUNT_LIMITER: undefined }, {});
+    expect(noLimit.status).toBe(503);
+    const noSecret = await worker.fetch(request('/api/webhooks', { method: 'POST', body: '{}' }), { ...env, RESEND_WEBHOOK_SECRET: undefined }, {});
+    expect(noSecret.status).toBe(503);
+    expect((await fetch('/api/webhooks', { method: 'POST', body: '{}' })).status).toBe(415);
+  });
+  it('rejects signed webhook IDs with invalid types before database writes', async () => {
+    const update = vi.spyOn(emailService, 'updateEmailStatus');
+    await expect((await import('../src/service/resend-service')).default.webhooks({}, { type: 'email.delivered', data: { email_id: {} } })).rejects.toMatchObject({ code: 400 });
+    expect(update).not.toHaveBeenCalled();
   });
 });
