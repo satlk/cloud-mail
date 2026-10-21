@@ -70,13 +70,21 @@ http.interceptors.response.use((res) => {
         })
     },
     (error) => {
-
-        if (error.status === 403) {
-            location.reload();
-            return;
+        const status = error.response?.status ?? error.status;
+        if (status === 401) {
+            localStorage.removeItem('token');
+            router.replace('/login');
+            return Promise.reject(error.response?.data || error);
+        }
+        if (status === 403) {
+            if (!error.config?.noMsg) ElMessage({
+                message: error.response?.data?.message || i18n.global.t('reqFailErrorMsg'),
+                type: 'warning', plain: true, grouping: true,
+            });
+            return Promise.reject(error.response?.data || error);
         }
 
-        const noMsg = error.config.noMsg;
+        const noMsg = error.config?.noMsg;
 
         if (noMsg) {
             return Promise.reject(error)
