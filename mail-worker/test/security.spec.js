@@ -12,13 +12,13 @@ import emailService from '../src/service/email-service';
 import loginService from '../src/service/login-service';
 import userService from '../src/service/user-service';
 import { createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 const values = new Map();
 const sqlite = new DatabaseSync(':memory:');
+sqlite.exec(readFileSync(new URL('../migrations/security-auth-rate-limits.sql', import.meta.url), 'utf8'));
 const env = {
   admin: 'admin@example.test', jwt_secret: 'isolated-test-secret', domain: ['example.test'],
-  AUTH_IP_LIMITER: { async limit() { return { success: true }; } },
-  AUTH_ACCOUNT_LIMITER: { async limit() { return { success: true }; } },
   RESEND_WEBHOOK_SECRET: 'whsec_' + Buffer.from('isolated-webhook-test-secret').toString('base64'),
   kv: {
     async put(key, value) { values.set(key, value); },
@@ -41,7 +41,7 @@ async function session(userId = 7, email = 'user@example.test') {
   await env.kv.put('auth-uid:' + userId, JSON.stringify({ user: { userId, email }, tokens: ['test-token'], refreshTime: new Date().toISOString() }));
   return jwt.generateToken({ env }, { userId, token: 'test-token' });
 }
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); sqlite.exec('DELETE FROM auth_rate_limits'); });
 
 describe('security regression', () => {
   it('blocks anonymous KV secrets, attachments, and every legacy public route', async () => {
@@ -131,16 +131,24 @@ describe('security regression', () => {
     expect(prepare).not.toHaveBeenCalled();
   });
   it('rate limits auth by trusted source and normalized account before login work', async () => {
-    const ip = vi.spyOn(env.AUTH_IP_LIMITER, 'limit').mockResolvedValue({ success: false });
+    vi.spyOn(Date, 'now').mockReturnValue(1800000);
+    for (let i = 0; i < 30; i++) expect((await fetch('/api/login', { method: 'POST', body: '{}' })).status).toBe(400);
     let response = await fetch('/api/login', { method: 'POST', body: '{}' });
     expect(response.status).toBe(429);
     expect(response.headers.get('Retry-After')).toBe('60');
-    ip.mockResolvedValue({ success: true });
-    const account = vi.spyOn(env.AUTH_ACCOUNT_LIMITER, 'limit').mockResolvedValue({ success: false });
+    sqlite.exec('DELETE FROM auth_rate_limits');
+    vi.spyOn(loginService, 'login').mockResolvedValue('synthetic-token');
+    for (let i = 0; i < 10; i++) expect((await fetch('/api/login', { method: 'POST', body: JSON.stringify({ email: 'user@example.test', password: 'wrong' }) })).status).toBe(200);
     response = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ email: ' USER@Example.TEST ', password: 'wrong' }) });
     expect(response.status).toBe(429);
-    expect(account).toHaveBeenCalledWith({ key: 'auth-account:user@example.test' });
     expect((await fetch('/api/register', { method: 'POST', body: JSON.stringify({ email: 'user@example.test', password: 'test-password' }) })).status).toBe(429);
+  });
+  it('atomically enforces the shared account limit for concurrent attempts', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1800000);
+    vi.spyOn(loginService, 'login').mockResolvedValue('synthetic-token');
+    const responses = await Promise.all(Array.from({ length: 20 }, () => fetch('/api/login', { method: 'POST', body: JSON.stringify({ email: 'parallel@example.test', password: 'wrong' }) })));
+    expect(responses.filter(r => r.status === 200)).toHaveLength(10);
+    expect(responses.filter(r => r.status === 429)).toHaveLength(10);
   });
   it('returns the same failure for nonexistent accounts and wrong passwords', async () => {
     const lookup = vi.spyOn(userService, 'selectByEmailIncludeDel').mockResolvedValue(null);
@@ -168,7 +176,7 @@ describe('security regression', () => {
     expect(update).toHaveBeenCalledOnce();
   });
   it('fails closed when auth or webhook security configuration is missing', async () => {
-    const noLimit = await worker.fetch(request('/api/login', { method: 'POST', body: '{}' }), { ...env, AUTH_ACCOUNT_LIMITER: undefined }, {});
+    const noLimit = await worker.fetch(request('/api/login', { method: 'POST', body: '{}' }), { ...env, db: undefined }, {});
     expect(noLimit.status).toBe(503);
     const noSecret = await worker.fetch(request('/api/webhooks', { method: 'POST', body: '{}' }), { ...env, RESEND_WEBHOOK_SECRET: undefined }, {});
     expect(noSecret.status).toBe(503);

@@ -86,6 +86,20 @@ const premKey = {
 	'reg-key:delete': ['/regKey/delete','/regKey/clearNotUse'],
 };
 
+async function consumeAuthAttempt(c, kind, identity, limit) {
+	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity));
+	const key = kind + ':' + Array.from(new Uint8Array(digest), n => n.toString(16).padStart(2, '0')).join('');
+	const window = Math.floor(Date.now() / 60000);
+	const row = await c.env.db.prepare(`INSERT INTO auth_rate_limits (key, window_start, count) VALUES (?, ?, 1)
+		ON CONFLICT(key) DO UPDATE SET window_start=excluded.window_start,
+		count=CASE WHEN auth_rate_limits.window_start=excluded.window_start THEN auth_rate_limits.count+1 ELSE 1 END
+		RETURNING count`).bind(key, window).first();
+	if (row.count > limit) {
+		c.header('Retry-After', String(60 - Math.floor(Date.now() / 1000) % 60));
+		throw new BizError('Too many attempts; retry in one minute', 429);
+	}
+}
+
 app.use('/login', bodyLimit({ maxSize: 8192 }));
 app.use('/register', bodyLimit({ maxSize: 8192 }));
 app.use('*', async (c, next) => {
@@ -94,21 +108,14 @@ app.use('*', async (c, next) => {
 	const matches = (prefix) => path === prefix || path.startsWith(prefix + '/');
 	if (matches('/init')) return c.notFound();
 	if (c.req.method === 'POST' && (path === '/login' || path === '/register')) {
-		if (!c.env.AUTH_IP_LIMITER || !c.env.AUTH_ACCOUNT_LIMITER) throw new BizError('Authentication temporarily unavailable', 503);
+		if (!c.env.db) throw new BizError('Authentication temporarily unavailable', 503);
 		const ip = c.req.header('CF-Connecting-IP') || 'unknown';
-		if (!(await c.env.AUTH_IP_LIMITER.limit({ key: 'auth-ip:' + ip })).success) {
-			c.header('Retry-After', '60');
-			throw new BizError('Too many attempts; retry in one minute', 429);
-		}
+		await consumeAuthAttempt(c, 'ip', ip, 30);
 		let body;
 		try { body = await c.req.json(); } catch { throw new BizError('Invalid request', 400); }
 		if (typeof body?.email !== 'string' || body.email.length > 254) throw new BizError('Invalid request', 400);
-		// ponytail: native counters are approximate per Cloudflare location; use Durable Objects for strict global limits.
 		const email = body.email.trim().toLowerCase();
-		if (!(await c.env.AUTH_ACCOUNT_LIMITER.limit({ key: 'auth-account:' + email })).success) {
-			c.header('Retry-After', '60');
-			throw new BizError('Too many attempts; retry in one minute', 429);
-		}
+		await consumeAuthAttempt(c, 'account', email, 10);
 	}
 	if (path === '/webhooks' && c.req.method === 'POST') return next();
 	if (/^\/telegram\/getEmail\/[^/]+$/.test(path) && c.req.method === 'GET') return next();

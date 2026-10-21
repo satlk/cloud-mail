@@ -2,16 +2,6 @@ name = "${NAME}"
 main = "src/index.js"
 compatibility_date = "2025-06-04"
 
-[[ratelimits]]
-name = "AUTH_IP_LIMITER"
-namespace_id = "731001"
-simple = { limit = 30, period = 60 }
-
-[[ratelimits]]
-name = "AUTH_ACCOUNT_LIMITER"
-namespace_id = "731002"
-simple = { limit = 10, period = 60 }
-
 [observability]
 enabled = true
 

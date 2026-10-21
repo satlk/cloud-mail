@@ -25,6 +25,7 @@ export default {
 	},
 	email: email,
 	async scheduled(c, env, ctx) {
+		await env.db.prepare('DELETE FROM auth_rate_limits WHERE window_start < ?').bind(Math.floor(Date.now() / 60000) - 60).run();
 		if (c.cron === '*/30 * * * *') {
 			await analysisService.refreshEchartsCache({ env })
 			return;
