@@ -13,20 +13,21 @@ const base64urlDecode = (str) => {
 };
 
 const jwtUtils = {
-	async generateToken(c, payload, expiresInSeconds) {
+	async generateToken(c, payload, expiresInSeconds = 60 * 60 * 24 * 30) {
+		if (typeof c.env.jwt_secret !== 'string' || c.env.jwt_secret.length < 32) throw new Error('JWT secret must contain at least 32 random characters');
 		const header = {
 			alg: 'HS256',
 			typ: 'JWT'
 		};
 
 		const now = Math.floor(Date.now() / 1000);
-		const exp = expiresInSeconds ? now + expiresInSeconds : undefined;
+		const exp = now + Math.min(Math.max(Number(expiresInSeconds) || 1, 1), 60 * 60 * 24 * 30);
 
 		const fullPayload = {
 			...payload,
-			ver: c.env.session_version || 'security-v1',
+			ver: c.env.session_version || 'security-v2',
 			iat: now,
-			...(exp ? { exp } : {})
+			exp
 		};
 
 		const headerStr = base64url(encoder.encode(JSON.stringify(header)));
@@ -48,9 +49,13 @@ const jwtUtils = {
 	},
 
 	async verifyToken(c, token) {
-		if (typeof token !== 'string') return null;
+		if (typeof token !== 'string' || token.length > 8192 || typeof c.env.jwt_secret !== 'string' || c.env.jwt_secret.length < 32) return null;
 		try {
-			const [headerB64, payloadB64, signatureB64] = token.split('.');
+			const parts = token.split('.');
+			if (parts.length !== 3) return null;
+			const [headerB64, payloadB64, signatureB64] = parts;
+			const header = JSON.parse(decoder.decode(base64urlDecode(headerB64)));
+			if (header.alg !== 'HS256' || header.typ !== 'JWT') return null;
 
 			if (!headerB64 || !payloadB64 || !signatureB64) return null;
 
@@ -74,15 +79,16 @@ const jwtUtils = {
 
 			const payloadJson = decoder.decode(base64urlDecode(payloadB64));
 			const payload = JSON.parse(payloadJson);
-			if (payload.ver !== (c.env.session_version || 'security-v1')) return null;
+			if (payload.ver !== (c.env.session_version || 'security-v2')) return null;
 
 			const now = Math.floor(Date.now() / 1000);
-			if (payload.exp && payload.exp < now) return null;
+			if (!Number.isInteger(payload.exp) || payload.exp <= now || !Number.isInteger(payload.iat) || payload.iat > now + 60 || payload.exp <= payload.iat || payload.exp - payload.iat > 60 * 60 * 24 * 30) return null;
+			if (!Number.isSafeInteger(payload.userId) || payload.userId <= 0 || typeof payload.token !== 'string' || !payload.token) return null;
 
 			return payload;
 
 		} catch (err) {
-			console.log(err)
+
 			return null;
 		}
 	}

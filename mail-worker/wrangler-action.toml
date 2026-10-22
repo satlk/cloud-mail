@@ -1,5 +1,6 @@
 name = "${NAME}"
 main = "src/index.js"
+keep_vars = true
 compatibility_date = "2025-06-04"
 
 [observability]
@@ -41,7 +42,7 @@ analysis_cache = "${ANALYSIS_CACHE}"
 #orm_log = false
 domain = "${DOMAIN}"
 admin = "${ADMIN}"
-jwt_secret = "${JWT_SECRET}"
+# jwt_secret is an operator-managed Cloudflare secret; preserve it on deploy.
 project_link = "${PROJECT_LINK}"
 
 [build]

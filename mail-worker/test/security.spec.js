@@ -18,7 +18,7 @@ const values = new Map();
 const sqlite = new DatabaseSync(':memory:');
 sqlite.exec(readFileSync(new URL('../migrations/security-auth-rate-limits.sql', import.meta.url), 'utf8'));
 const env = {
-  admin: 'admin@example.test', jwt_secret: 'isolated-test-secret', domain: ['example.test'],
+  admin: 'admin@example.test', jwt_secret: 'isolated-test-secret-with-at-least-32-characters', domain: ['example.test'],
   RESEND_WEBHOOK_SECRET: 'whsec_' + Buffer.from('isolated-webhook-test-secret').toString('base64'),
   kv: {
     async put(key, value) { values.set(key, value); },
@@ -187,4 +187,54 @@ describe('security regression', () => {
     await expect((await import('../src/service/resend-service')).default.webhooks({}, { type: 'email.delivered', data: { email_id: {} } })).rejects.toMatchObject({ code: 400 });
     expect(update).not.toHaveBeenCalled();
   });
+});
+
+it('requires strong JWT configuration, strict header/claims and bounded expiry', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  function sign(payload, header = { alg: 'HS256', typ: 'JWT' }) {
+    const data = Buffer.from(JSON.stringify(header)).toString('base64url') + '.' + Buffer.from(JSON.stringify(payload)).toString('base64url');
+    return data + '.' + createHmac('sha256', env.jwt_secret).update(data).digest('base64url');
+  }
+  const payload = { userId: 7, token: 'test-token', ver: 'security-v2', iat: now, exp: now + 3600 };
+  expect(await jwt.verifyToken({ env }, sign(payload))).toMatchObject({ userId: 7 });
+  for (const changed of [{ exp: undefined }, { exp: now }, { iat: now + 600 }, { exp: now + 2592001 }, { userId: -1 }, { token: {} }, { ver: 'security-v1' }])
+    expect(await jwt.verifyToken({ env }, sign({ ...payload, ...changed }))).toBeNull();
+  expect(await jwt.verifyToken({ env }, sign(payload, { alg: 'none', typ: 'JWT' }))).toBeNull();
+  expect(await jwt.verifyToken({ env }, sign(payload) + '.extra')).toBeNull();
+  await expect(jwt.generateToken({ env: { jwt_secret: 'weak' } }, payload)).rejects.toThrow('32 random');
+});
+
+it('restricts outbound mail webhooks to deployment-approved URLs and refuses redirects', async () => {
+  const { default: webhooks, approvedWebhookUrl } = await import('../src/service/webhook-service');
+  const c = { env: { WEBHOOK_ALLOWED_URLS: 'https://trusted.example/mail' } };
+  for (const value of ['http://trusted.example/mail', 'https://127.0.0.1/mail', 'https://[::1]/mail', 'https://169.254.169.254/', 'https://evil.example/mail', 'https://trusted.example/other', 'https://user@trusted.example/mail', 'https://trusted.example/mail#x'])
+    expect(() => approvedWebhookUrl(c, value)).toThrow();
+  expect(approvedWebhookUrl(c, 'https://trusted.example/mail')).toBe('https://trusted.example/mail');
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 302, headers: { Location: 'http://127.0.0.1' } }));
+  await webhooks.sendEmail(c, {}, 'https://trusted.example/mail', 100);
+  expect(fetchMock).toHaveBeenCalledOnce();
+  expect(fetchMock.mock.calls[0][1].redirect).toBe('manual');
+  expect(fetchMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  fetchMock.mockClear();
+  await webhooks.sendEmail({ env: {} }, {}, 'https://trusted.example/mail');
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it('sets security headers on static pages and API errors', async () => {
+  const staticEnv = { ...env, assets: { fetch: async () => new Response('<html>test</html>', { headers: { 'Content-Type': 'text/html' } }) } };
+  for (const path of ['/', '/api/my/loginUserInfo']) {
+    const response = await worker.fetch(request(path), staticEnv, {});
+    expect(response.headers.get('Strict-Transport-Security')).toContain('31536000');
+    expect(response.headers.get('Content-Security-Policy')).toContain("object-src 'none'");
+    expect(response.headers.get('X-Frame-Options')).toBe('DENY');
+  }
+});
+
+it('keeps production CI on existing storage bindings and operator-managed JWT secrets', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/deploy-cloudflare.yml', import.meta.url), 'utf8');
+  expect(workflow).toContain('--config wrangler.toml --keep-vars --no-autoconfig');
+  expect(workflow).not.toContain('/api/init/');
+  expect(workflow).not.toMatch(/wrangler (d1|kv) create/);
+  const config = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+  expect(config).not.toMatch(/^jwt_secret\s*=/m);
 });

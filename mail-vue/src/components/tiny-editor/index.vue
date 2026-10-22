@@ -6,6 +6,7 @@
 </template>
 
 <script setup>
+import { sanitizeEmailHtml } from '@/utils/email-html'
 import {ref, onMounted, onBeforeUnmount, watch, nextTick, shallowRef, defineEmits, computed} from 'vue';
 import loading from "@/components/loading/index.vue";
 import {useI18n} from 'vue-i18n'
@@ -49,7 +50,7 @@ onBeforeUnmount(() => {
 
 watch(() => props.defValue, (newValue) => {
   if (editor.value && editor.value.getContent() !== newValue) {
-    editor.value.setContent(newValue);
+    editor.value.setContent(sanitizeEmailHtml(newValue));
   }
 });
 
@@ -113,7 +114,7 @@ function initEditor() {
     setup: (ed) => {
       editor.value = ed;
       ed.on('init', () => {
-        ed.setContent(props.defValue);
+        ed.setContent(sanitizeEmailHtml(props.defValue));
         isInitialized.value = true;
       });
       ed.on('input change', () => {

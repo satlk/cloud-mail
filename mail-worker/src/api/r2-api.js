@@ -28,7 +28,10 @@ app.get('/oss/*', async (c) => {
 	headers.delete('Access-Control-Allow-Origin');
 	headers.set('X-Content-Type-Options', 'nosniff');
 	headers.set('Content-Security-Policy', "sandbox; default-src 'none'");
-	if (key.startsWith('attachments/')) headers.set('Cache-Control', 'private, no-store');
+	if (key.startsWith('attachments/')) {
+		headers.set('Cache-Control', 'private, no-store');
+		if (!/^image\/(png|jpeg|gif|webp|bmp)$/i.test(headers.get('Content-Type') || '')) headers.set('Content-Disposition', `attachment; filename="${key.split('/').pop()}"`);
+	}
 	return new Response(resp.body, { status: resp.status, headers });
 });
 

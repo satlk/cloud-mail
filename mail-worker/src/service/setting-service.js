@@ -1,3 +1,4 @@
+import { approvedWebhookUrl } from './webhook-service';
 import KvConst from '../const/kv-const';
 import setting from '../entity/setting';
 import orm from '../entity/orm';
@@ -126,7 +127,7 @@ const settingService = {
 		}
 
 		if (params.webhookUrl !== undefined) {
-			params.webhookUrl = domainUtils.toOssDomain(params.webhookUrl) || '';
+			params.webhookUrl = approvedWebhookUrl(c, params.webhookUrl);
 		}
 
 		params.resendTokens = JSON.stringify(resendTokens);

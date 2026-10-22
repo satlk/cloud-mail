@@ -5,8 +5,7 @@ import verifyRecordService from './service/verify-record-service';
 import emailService from './service/email-service';
 import oauthService from './service/oauth-service';
 import analysisService from './service/analysis-service';
-export default {
-	 async fetch(req, env, ctx) {
+async function route(req, env, ctx) {
 
 		const url = new URL(req.url)
 
@@ -22,7 +21,21 @@ export default {
 		}
 
 		return env.assets.fetch(req);
+	}
+
+export default {
+	async fetch(req, env, ctx) {
+		const result = await route(req, env, ctx);
+		const response = new Response(result.body, result);
+		response.headers.set('Strict-Transport-Security', 'max-age=31536000');
+		response.headers.set('X-Content-Type-Options', 'nosniff');
+		response.headers.set('X-Frame-Options', 'DENY');
+		response.headers.set('Referrer-Policy', 'no-referrer');
+		response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+		if (!response.headers.has('Content-Security-Policy')) response.headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' https: data:; connect-src 'self' https://api.iconify.design https://api.simplesvg.com https://api.unisvg.com; frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
+		return response;
 	},
+
 	email: email,
 	async scheduled(c, env, ctx) {
 		await env.db.prepare('DELETE FROM auth_rate_limits WHERE window_start < ?').bind(Math.floor(Date.now() / 60000) - 60).run();

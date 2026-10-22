@@ -204,6 +204,8 @@ const userService = {
 		const delAccountMap = Object.fromEntries(delAccountCounts.map(item => [item.userId, item.count]));
 
 		for (const user of list) {
+			delete user.password;
+			delete user.salt;
 
 			const userId = user.userId;
 
