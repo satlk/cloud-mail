@@ -29,7 +29,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: mail-worker/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir ../mail-vue install --frozen-lockfile
       - run: pnpm run test:security
       # Preserve existing D1/KV IDs and operator-managed secrets. Never recreate databases or inject JWT_SECRET.
       - run: pnpm wrangler d1 execute cloudmail --remote --config wrangler.toml --file migrations/security-auth-rate-limits.sql
       - run: pnpm wrangler deploy --config wrangler.toml --keep-vars --no-autoconfig
+
