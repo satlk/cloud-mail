@@ -24,3 +24,10 @@ it('rejects forbidden requests without a reload loop', async () => {
   expect(location.reload).not.toHaveBeenCalled();
   expect(localStorage.removeItem).not.toHaveBeenCalled();
 });
+
+it('sends current-password proof when changing the account password', async () => {
+  const { resetPassword } = await import('../../mail-vue/src/request/my.js');
+  const put = vi.spyOn(http, 'put').mockResolvedValue({});
+  await resetPassword('new-test-password', 'current-test-password');
+  expect(put).toHaveBeenCalledWith('/my/resetPassword', { password: 'new-test-password', currentPassword: 'current-test-password' });
+});

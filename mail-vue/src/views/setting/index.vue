@@ -53,6 +53,7 @@
     </div>
     <el-dialog v-model="pwdShow" :title="$t('changePassword')" width="340">
       <div class="update-pwd">
+        <el-input type="password" placeholder="当前密码 / Current password" v-model="form.currentPassword" autocomplete="current-password" @keyup.enter="submitPwd"/>
         <el-input type="password" :placeholder="$t('newPassword')" v-model="form.password" autocomplete="off" @keyup.enter="submitPwd"/>
         <el-input type="password" :placeholder="$t('confirmPassword')" v-model="form.newPwd" autocomplete="off" @keyup.enter="submitPwd"/>
         <el-button type="primary" :loading="setPwdLoading" @click="submitPwd">{{$t('save')}}</el-button>
@@ -135,6 +136,7 @@ function changeLang(lang) {
 
 const pwdShow = ref(false)
 const form = reactive({
+  currentPassword: '',
   password: '',
   newPwd: '',
 })
@@ -190,7 +192,7 @@ function submitPwd() {
   }
 
   setPwdLoading.value = true
-  resetPassword(form.password).then(() => {
+  resetPassword(form.password, form.currentPassword).then(() => {
     ElMessage({
       message: t('saveSuccessMsg'),
       type: 'success',
@@ -200,6 +202,9 @@ function submitPwd() {
     setPwdLoading.value = false
     form.password = ''
     form.newPwd = ''
+    form.currentPassword = ''
+    localStorage.removeItem('token')
+    router.replace('/login')
   }).catch(() => {
     setPwdLoading.value = false
   })

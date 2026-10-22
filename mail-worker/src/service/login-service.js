@@ -208,7 +208,7 @@ const loginService = {
 			throw new BizError('邮箱或密码错误', 401);
 		}
 
-		const userRow = await userService.selectByEmailIncludeDel(c, email);
+		let userRow = await userService.selectByEmailIncludeDel(c, email);
 
 		if (!noVerifyPwd && (!userRow || !userRow.password.startsWith('pbkdf2-sha256$'))) {
 			await cryptoUtils.verifyPassword(password, 'login-dummy-salt', 'pbkdf2-sha256$100000$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
@@ -218,8 +218,10 @@ const loginService = {
 			throw new BizError('邮箱或密码错误', 401);
 		}
 		if (!noVerifyPwd && !userRow.password.startsWith('pbkdf2-sha256$')) {
-			await userService.resetPassword(c, { password }, userRow.userId);
+			await userService.resetPassword(c, { password }, userRow.userId, false);
+			userRow = await userService.selectById(c, userRow.userId);
 		}
+		const credentialVersion = userRow.salt;
 		delete userRow.password;
 		delete userRow.salt;
 
@@ -228,7 +230,7 @@ const loginService = {
 
 		let authInfo = await c.env.kv.get(KvConst.AUTH_INFO + userRow.userId, { type: 'json' });
 
-		if (authInfo && (authInfo.user.email === userRow.email)) {
+		if (authInfo && authInfo.credentialVersion === credentialVersion && (authInfo.user.email === userRow.email)) {
 			delete authInfo.user.password;
 			delete authInfo.user.salt;
 
@@ -241,6 +243,7 @@ const loginService = {
 		} else {
 
 			authInfo = {
+				credentialVersion,
 				tokens: [],
 				user: userRow,
 				refreshTime: dayjs().toISOString()

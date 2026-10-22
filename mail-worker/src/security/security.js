@@ -13,8 +13,7 @@ import { bodyLimit } from 'hono/body-limit';
 const exclude = [
 	'/login',
 	'/register',
-	'/setting/websiteConfig',
-	'/oauth'
+	'/setting/websiteConfig'
 ];
 
 const requirePerms = [
@@ -102,10 +101,14 @@ async function consumeAuthAttempt(c, kind, identity, limit) {
 
 app.use('/login', bodyLimit({ maxSize: 8192 }));
 app.use('/register', bodyLimit({ maxSize: 8192 }));
+app.use('/my/resetPassword', bodyLimit({ maxSize: 8192 }));
+app.use('/email/send', bodyLimit({ maxSize: 32 * 1024 * 1024 }));
 app.use('*', async (c, next) => {
 
 	const path = c.req.path;
 	const matches = (prefix) => path === prefix || path.startsWith(prefix + '/');
+	// Unconfigured OAuth is retired until state, identity scoping and binding proofs are implemented.
+	if (matches('/oauth')) throw new BizError('OAuth is disabled', 403);
 	if (matches('/init')) return c.notFound();
 	if (c.req.method === 'POST' && (path === '/login' || path === '/register')) {
 		if (!c.env.db) throw new BizError('Authentication temporarily unavailable', 503);
@@ -128,13 +131,7 @@ app.use('*', async (c, next) => {
 		throw new BizError('Legacy public API disabled; use authenticated user APIs', 403);
 	}
 
-	const index = exclude.findIndex(item => {
-		return matches(item);
-	});
-
-	if (index > -1) {
-		return await next();
-	}
+	if (exclude.includes(path)) return next();
 
 	const jwt = c.req.header(constant.TOKEN_HEADER) ||
 		(objectRequest && ['GET', 'HEAD'].includes(c.req.method) ? getCookie(c, '__Host-mail-session') : undefined);
@@ -156,6 +153,11 @@ app.use('*', async (c, next) => {
 		throw new BizError(t('authExpired'), 401);
 	}
 
+	// Password salts rotate on every reset. D1 is authoritative even while KV replicas lag.
+	const current = await c.env.db.prepare('SELECT salt, status, is_del, email FROM user WHERE user_id = ?').bind(userId).first();
+	if (!current || current.status !== 0 || current.is_del !== 0 || !authInfo.credentialVersion || authInfo.credentialVersion !== current.salt || authInfo.user.email !== current.email) {
+		throw new BizError(t('authExpired'), 401);
+	}
 	const permIndex = requirePerms.findIndex(item => {
 		return matches(item);
 	});
@@ -185,6 +187,7 @@ app.use('*', async (c, next) => {
 		await c.env.kv.put(KvConst.AUTH_INFO + userId, JSON.stringify(authInfo), { expirationTtl: constant.TOKEN_EXPIRE });
 	}
 
+	if (path === '/my/resetPassword' && c.req.method === 'PUT') await consumeAuthAttempt(c, 'password-change', String(userId), 5);
 	c.set('user',authInfo.user)
 	delete authInfo.user.password;
 	delete authInfo.user.salt;

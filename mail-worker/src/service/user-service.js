@@ -56,9 +56,14 @@ const userService = {
 	},
 
 
-	async resetPassword(c, params, userId) {
+	async resetPassword(c, params, userId, requireCurrentPassword = true) {
 
-		const { password } = params;
+		const { password, currentPassword } = params;
+		if (requireCurrentPassword) {
+			if (typeof currentPassword !== 'string' || !currentPassword || currentPassword.length > 128) throw new BizError('当前密码错误', 403);
+			const row = await this.selectById(c, userId);
+			if (!row || !await cryptoUtils.verifyPassword(currentPassword, row.salt, row.password)) throw new BizError('当前密码错误', 403);
+		}
 		if (typeof password !== 'string' || password.length > 128) throw new BizError('Invalid password', 400);
 
 		if (password.length < 6) {
@@ -66,6 +71,7 @@ const userService = {
 		}
 		const { salt, hash } = await cryptoUtils.hashPassword(password);
 		await orm(c).update(user).set({ password: hash, salt: salt }).where(eq(user.userId, userId)).run();
+		await c.env.kv.delete(KvConst.AUTH_INFO + userId);
 	},
 
 	selectByEmail(c, email) {
@@ -115,6 +121,7 @@ const userService = {
 		await accountService.physicsDeleteByUserIds(c, userIds);
 		await oauthService.deleteByUserIds(c, userIds);
 		await orm(c).delete(user).where(inArray(user.userId, userIds)).run();
+		await Promise.all(userIds.map(id => c.env.kv.delete(KvConst.AUTH_INFO + id)));
 	},
 
 	async list(c, params) {
@@ -271,13 +278,14 @@ const userService = {
 	async setPwd(c, params) {
 
 		const { password, userId } = params;
-		await this.resetPassword(c, { password }, userId);
-		await c.env.kv.delete(KvConst.AUTH_INFO + userId);
+		await this.resetPassword(c, { password }, userId, false);
 	},
 
 	async setStatus(c, params) {
 
-		const { status, userId } = params;
+		const userId = Number(params.userId);
+		const status = Number(params.status);
+		if (!Number.isSafeInteger(userId) || userId <= 0 || ![0, 1].includes(status)) throw new BizError('Invalid user status', 400);
 
 		await orm(c)
 			.update(user)

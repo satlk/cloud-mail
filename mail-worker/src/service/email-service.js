@@ -1,4 +1,5 @@
 import orm from '../entity/orm';
+import verifyUtils from '../utils/verify-utils';
 import email from '../entity/email';
 import { emailListColumns, emailBriefColumns, EMAIL_LIST_TEXT_LEN } from '../lib/email-list-columns';
 import { attConst, emailConst, isDel, settingConst } from '../const/entity-const';
@@ -261,9 +262,13 @@ const emailService = {
 			attachments = [] //附件
 		} = params;
 
+		if (!Array.isArray(receiveEmail) || !receiveEmail.length || receiveEmail.length > 100 || receiveEmail.some(value => typeof value !== 'string' || value.length > 254 || !verifyUtils.isEmail(value))) throw new BizError('Invalid recipients', 400);
+		if (!Array.isArray(attachments) || attachments.length > 10) throw new BizError('Invalid attachment count', 400);
+		if (content !== undefined && typeof content !== 'string') throw new BizError('Invalid email content', 400);
+		if ([name, subject].some(value => value !== undefined && (typeof value !== 'string' || /[\r\n]/.test(value)))) throw new BizError('Invalid email header', 400);
 		const { resendTokens, r2Domain, send, domainList } = await settingService.query(c);
 
-		let { imageDataList, html } = await attService.toImageUrlHtml(c, content);
+
 
 		//判断是否关闭发件功能
 		if (send === settingConst.send.CLOSE) {
@@ -349,12 +354,14 @@ const emailService = {
 
 			emailRow = await this.selectById(c, emailId);
 
-			if (!emailRow) {
-				throw new BizError(t('notExistEmailReply'));
+			if (!emailRow || emailRow.userId !== userId) {
+				throw new BizError('Email unavailable', 404);
 			}
 
 		}
 
+		let { imageDataList, html } = await attService.toImageUrlHtml(c, content || '', userId);
+		if (imageDataList.length > 10) throw new BizError(t('imageAttLimit'), 400);
 		let sendResult = {};
 
 		//存在站外邮箱时，如果配置了 Cloudflare Email Service 就优先使用，否则使用 Resend

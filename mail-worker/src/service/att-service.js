@@ -1,3 +1,4 @@
+import BizError from '../error/biz-error';
 import orm from '../entity/orm';
 import { att } from '../entity/att';
 import { and, eq, isNull, inArray, desc } from 'drizzle-orm';
@@ -47,7 +48,8 @@ const attService = {
 		).all();
 	},
 
-	async toImageUrlHtml(c, content) {
+	async toImageUrlHtml(c, content, userId) {
+		if (!Number.isSafeInteger(userId) || userId <= 0) throw new BizError('Attachment owner required', 403);
 
 		const { r2Domain } = await settingService.query(c);
 
@@ -81,26 +83,16 @@ const attService = {
 				imageDataList.push(attData);
 			}
 
-			//邮件正文站内图片转cid附件
-			if (src && (src.startsWith(domainUtils.toOssDomain(r2Domain)) || src.startsWith('attachments/'))) {
-
-				const cid = uuidv4().replace(/-/g, '')
+			// Resolve only known local attachment paths, then enforce ownership before object reads.
+			const domain = domainUtils.toOssDomain(r2Domain);
+			let key;
+			if (src && /^\/?(?:oss\/)?attachments\//.test(src)) key = src.replace(/^\/?(?:oss\/)?/, '');
+			else if (src && domain && src.startsWith(domain + '/attachments/')) key = src.slice(domain.length + 1);
+			if (key) {
+				if (!/^attachments\/[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9]+)?$/.test(key)) throw new BizError('Attachment unavailable', 404);
+				const cid = uuidv4().replace(/-/g, '');
 				img.setAttribute('src', 'cid:' + cid);
-
-				const attData = {};
-
-				if (src.startsWith(domainUtils.toOssDomain(r2Domain))) {
-					attData.key = src.replace(domainUtils.toOssDomain(r2Domain) + '/','');
-				}
-
-				if (src.startsWith('attachments/')) {
-					attData.key = src;
-				}
-
-				attData.contentId = cid;
-				attData.type = attConst.type.EMBED;
-				imageDataList.push(attData);
-
+				imageDataList.push({ key, contentId: cid, type: attConst.type.EMBED });
 			}
 
 			const hasInlineWidth = img.hasAttribute('width');
@@ -115,7 +107,8 @@ const attService = {
 
 		//查询已有内嵌url图片信息
 		const keys = [...new Set(imageDataList.filter(item => !item.content).map(item => item.key))];
-		const dbImageList  = await this.selectOneByKeys(c, keys);
+		const dbImageList  = await this.selectOneByKeys(c, keys, userId);
+		if (keys.some(key => !dbImageList.some(row => row.key === key))) throw new BizError('Attachment unavailable', 404);
 
 		//设置给当前附件
 		await Promise.all(imageDataList.map(async image => {
@@ -266,11 +259,12 @@ const attService = {
 		await this.removeAttByField(c, "account_id", [accountId])
 	},
 
-	selectOneByKeys(c, keys) {
+	selectOneByKeys(c, keys, userId) {
+		if (!Number.isSafeInteger(userId) || userId <= 0) throw new BizError('Attachment owner required', 403);
 		if (!keys || keys.length === 0) {
 			return []
 		}
-		return orm(c).select().from(att).where(inArray(att.key, keys)).orderBy(desc(att.attId)).groupBy(att.key).all();
+		return orm(c).select().from(att).where(and(inArray(att.key, keys), eq(att.userId, userId))).orderBy(desc(att.attId)).groupBy(att.key).all();
 	}
 };
 

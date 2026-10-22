@@ -15,6 +15,7 @@ import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 const values = new Map();
+const activeUsers = new Map();
 const sqlite = new DatabaseSync(':memory:');
 sqlite.exec(readFileSync(new URL('../migrations/security-auth-rate-limits.sql', import.meta.url), 'utf8'));
 const env = {
@@ -27,9 +28,11 @@ const env = {
   },
   db: {
     async exec(sql) { sqlite.exec(sql); },
-    prepare(sql) { return { bind(...args) { return {
+    prepare(sql) { if (sql.startsWith('SELECT salt, status, is_del, email FROM user')) return { bind(id) { return { async first() { return activeUsers.get(id) || null; } }; } }; return { bind(...args) { return {
       async first() { return sqlite.prepare(sql).get(...args) ?? null; },
       async run() { return sqlite.prepare(sql).run(...args); },
+      async all() { return { results: sqlite.prepare(sql).all(...args) }; },
+      async raw() { return sqlite.prepare(sql).all(...args).map(row => Object.values(row)); },
     }; } }; },
   },
 };
@@ -38,7 +41,8 @@ const request = (path, options = {}) => new Request('https://mail.example.test' 
 const fetch = (path, options) => worker.fetch(request(path, options), env, {});
 app.get('/security-error-test', () => { throw new Error('D1_ERROR: private table details'); });
 async function session(userId = 7, email = 'user@example.test') {
-  await env.kv.put('auth-uid:' + userId, JSON.stringify({ user: { userId, email }, tokens: ['test-token'], refreshTime: new Date().toISOString() }));
+  activeUsers.set(userId, { salt: 'synthetic-epoch', status: 0, is_del: 0, email });
+  await env.kv.put('auth-uid:' + userId, JSON.stringify({ credentialVersion: 'synthetic-epoch', user: { userId, email }, tokens: ['test-token'], refreshTime: new Date().toISOString() }));
   return jwt.generateToken({ env }, { userId, token: 'test-token' });
 }
 afterEach(() => { vi.restoreAllMocks(); sqlite.exec('DELETE FROM auth_rate_limits'); });
@@ -237,4 +241,82 @@ it('keeps production CI on existing storage bindings and operator-managed JWT se
   expect(workflow).not.toMatch(/wrangler (d1|kv) create/);
   const config = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
   expect(config).not.toMatch(/^jwt_secret\s*=/m);
+});
+
+it('revokes existing sessions after a self-service password change', async () => {
+  sqlite.exec('CREATE TABLE IF NOT EXISTS user (user_id INTEGER PRIMARY KEY, password TEXT, salt TEXT); INSERT OR REPLACE INTO user VALUES (97, 1, 2);');
+  await session(97);
+  const { salt, hash } = await passwords.hashPassword('isolated-old-password');
+  vi.spyOn(userService, 'selectById').mockResolvedValue({ userId: 97, salt, password: hash });
+  await expect(userService.resetPassword({ env }, { password: 'isolated-new-password' }, 97)).rejects.toMatchObject({ code: 403 });
+  expect(await env.kv.get('auth-uid:97')).not.toBeNull();
+  await userService.resetPassword({ env }, { password: 'isolated-new-password', currentPassword: 'isolated-old-password' }, 97);
+  expect(await env.kv.get('auth-uid:97')).toBeNull();
+});
+
+it('closes dormant OAuth login and binding endpoints before database access', async () => {
+  const query = vi.spyOn(env.db, 'prepare');
+  for (const [method, path] of [['POST', '/api/oauth/github/login'], ['POST', '/api/oauth/google/login'], ['POST', '/api/oauth/linuxDo/login'], ['PUT', '/api/oauth/bindUser']]) {
+    expect((await fetch(path, { method, body: '{}' })).status).toBe(403);
+  }
+  expect(query).not.toHaveBeenCalled();
+});
+
+it('revokes sessions for administrator password reset and string-valued account bans', async () => {
+  sqlite.exec('ALTER TABLE user ADD COLUMN status INTEGER DEFAULT 0; INSERT OR REPLACE INTO user (user_id,password,salt) VALUES (98,1,2);');
+  await session(98);
+  await userService.setStatus({ env }, { userId: '98', status: '1' });
+  expect(await env.kv.get('auth-uid:98')).toBeNull();
+  await session(98);
+  await userService.setPwd({ env }, { userId: 98, password: 'admin-generated-test-password' });
+  expect(await env.kv.get('auth-uid:98')).toBeNull();
+  await expect(userService.setStatus({ env }, { userId: 98, status: 7 })).rejects.toMatchObject({ code: 400 });
+});
+
+it('rejects cross-user attachment references during inline-image conversion', async () => {
+  const { default: attachments } = await import('../src/service/att-service');
+  const { default: settings } = await import('../src/service/setting-service');
+  for (const column of ['email_id', 'account_id', 'filename', 'mime_type', 'size', 'status', 'type', 'disposition', 'related', 'content_id', 'encoding', 'create_time'])
+    sqlite.exec('ALTER TABLE attachments ADD COLUMN ' + column + ' TEXT');
+  sqlite.prepare('INSERT INTO attachments (att_id,user_id,key,filename,mime_type) VALUES (23,8,?,?,?)').run('attachments/victim-only.png', 'synthetic.png', 'image/png');
+  vi.spyOn(settings, 'query').mockResolvedValue({ r2Domain: '' });
+  const read = vi.spyOn(storage, 'getObj').mockImplementation(async () => new Response('synthetic-private-image'));
+  await expect(attachments.toImageUrlHtml({ env }, '<img src="attachments/victim-only.png">', 7)).rejects.toMatchObject({ code: 404 });
+  expect(read).not.toHaveBeenCalled();
+  for (const src of ['attachments/victim-only.png', '/attachments/victim-only.png', '/oss/attachments/victim-only.png']) {
+    const own = await attachments.toImageUrlHtml({ env }, `<img src="${src}">`, 8);
+    expect(own.imageDataList).toHaveLength(1);
+  }
+  await expect(attachments.toImageUrlHtml({ env }, '<img src="attachments/../secret">', 8)).rejects.toMatchObject({ code: 404 });
+});
+
+it('checks send authorization and reply ownership before loading objects', async () => {
+  const { default: settings } = await import('../src/service/setting-service');
+  const { default: attachments } = await import('../src/service/att-service');
+  const { default: accounts } = await import('../src/service/account-service');
+  const query = vi.spyOn(settings, 'query').mockResolvedValue({ send: 1 });
+  const read = vi.spyOn(attachments, 'toImageUrlHtml');
+  const params = { accountId: 7, receiveEmail: ['recipient@example.test'], content: '', attachments: [] };
+  await expect(emailService.send({ env }, params, 7)).rejects.toMatchObject({ code: 403 });
+  expect(read).not.toHaveBeenCalled();
+  query.mockResolvedValue({ send: 0, domainList: ['@example.test'], resendTokens: {} });
+  vi.spyOn(userService, 'selectById').mockResolvedValue({ userId: 7, email: env.admin, type: 1 });
+  vi.spyOn(roles, 'selectById').mockResolvedValue({});
+  vi.spyOn(accounts, 'selectById').mockResolvedValue({ userId: 7, email: env.admin });
+  vi.spyOn(emailService, 'selectById').mockResolvedValue({ userId: 8, messageId: 'synthetic-victim-message-id' });
+  await expect(emailService.send({ env }, { ...params, sendType: 'reply', emailId: 99 }, 7)).rejects.toMatchObject({ code: 404 });
+  expect(read).not.toHaveBeenCalled();
+});
+
+it('rejects stale KV sessions against authoritative D1 password epochs and account state', async () => {
+  const token = await session(96);
+  expect((await fetch('/api/oss/setting:', { headers: { Authorization: token } })).status).toBe(404);
+  activeUsers.get(96).salt = 'rotated-password-epoch';
+  expect((await fetch('/api/oss/setting:', { headers: { Authorization: token } })).status).toBe(401);
+  activeUsers.get(96).salt = 'synthetic-epoch';
+  activeUsers.get(96).status = 1;
+  expect((await fetch('/api/oss/setting:', { headers: { Authorization: token } })).status).toBe(401);
+  activeUsers.get(96).status = 0;
+  activeUsers.get(96).is_del = 1;
+  expect((await fetch('/api/oss/setting:', { headers: { Authorization: token } })).status).toBe(401);
 });
