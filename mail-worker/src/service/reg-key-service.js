@@ -13,17 +13,13 @@ const regKeyService = {
 
 		let {code,roleId,count,expireTime} = params;
 
-		if (!code) {
-			throw new BizError(t('emptyRegKey'));
-		}
-
-		if (!count) {
-			throw new BizError(t('emptyRegKey'));
-		}
-
-		if (!expireTime) {
-			throw new BizError(t('emptyRegKeyExpire'));
-		}
+        if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(code)
+            || !Number.isInteger(count) || count < 1 || count > 1000
+            || !Number.isInteger(roleId) || roleId <= 0
+            || typeof expireTime !== 'string' || !Number.isFinite(Date.parse(expireTime))
+            || toUtc(expireTime).tz('Asia/Shanghai').startOf('day').isBefore(toUtc().tz('Asia/Shanghai').startOf('day'))) {
+            throw new BizError('注册码参数无效', 400);
+        }
 
 		const regKeyRow = await orm(c).select().from(regKey).where(eq(regKey.code, code)).get();
 
@@ -31,7 +27,7 @@ const regKeyService = {
 			throw new BizError(t('isExistRegKye'));
 		}
 
-		const roleRow = roleService.selectById(c, roleId);
+		const roleRow = await roleService.selectById(c, roleId);
 		if (!roleRow) {
 			throw new BizError(t('roleNotExist'));
 		}
@@ -85,13 +81,13 @@ const regKeyService = {
 		return regKeyList;
 	},
 
-	async reduceCount(c, code, count) {
-		await orm(c).update(regKey).set({
-			count: sql`${regKey.count}
-	  -
-	  ${count}`
-		}).where(eq(regKey.code, code)).run();
-	},
+    async consume(c, id, roleId) {
+        // ponytail: reserve before provisioning; failed account creation consumes a use, admin can reissue.
+        const row = await c.env.db.prepare(
+            "UPDATE reg_key SET count = count - 1 WHERE rege_key_id = ? AND role_id = ? AND count > 0 AND date(expire_time, '+8 hours') >= date('now', '+8 hours') RETURNING rege_key_id"
+        ).bind(id, roleId).first();
+        if (!row) throw new BizError('注册码无效、已用完或已过期', 400);
+    },
 
 	async history(c, params) {
 		const { regKeyId } = params;

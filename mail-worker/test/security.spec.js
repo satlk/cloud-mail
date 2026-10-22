@@ -1,3 +1,4 @@
+import regKeys from '../src/service/reg-key-service';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import worker from '../src/index';
@@ -319,4 +320,28 @@ it('rejects stale KV sessions against authoritative D1 password epochs and accou
   activeUsers.get(96).status = 0;
   activeUsers.get(96).is_del = 1;
   expect((await fetch('/api/oss/setting:', { headers: { Authorization: token } })).status).toBe(401);
+});
+
+describe('invitation registration hardening', () => {
+  it('rejects malformed registration fields before database access', async () => {
+    for (const fields of [{code:{}},{code:[]},{password:{}},{email:[]},{token:{}}]) {
+      await expect(loginService.register({env}, {email:'new@example.test',password:'password123',...fields})).rejects.toMatchObject({code:400});
+    }
+  });
+  it('consumes a single invitation once under concurrent requests and rejects expired or changed roles', async () => {
+    sqlite.exec("CREATE TABLE IF NOT EXISTS reg_key (rege_key_id INTEGER PRIMARY KEY, code TEXT, count INTEGER, role_id INTEGER, user_id INTEGER DEFAULT 0, expire_time TEXT, create_time TEXT DEFAULT CURRENT_TIMESTAMP); DELETE FROM reg_key; INSERT INTO reg_key VALUES (901,'isolated-invitation',1,2,0,'2099-01-01',CURRENT_TIMESTAMP),(902,'expired-invitation',1,2,0,'2000-01-01',CURRENT_TIMESTAMP)");
+    const outcomes=await Promise.allSettled(Array.from({length:20},()=>regKeys.consume({env},901,2)));
+    expect(outcomes.filter(x=>x.status==='fulfilled')).toHaveLength(1);
+    expect(sqlite.prepare('SELECT count FROM reg_key WHERE rege_key_id=901').get().count).toBe(0);
+    await expect(regKeys.consume({env},902,2)).rejects.toMatchObject({code:400});
+    await expect(regKeys.consume({env},902,3)).rejects.toMatchObject({code:400});
+  });
+  it('validates invitation creation and awaits role existence', async () => {
+    const good={code:'isolated-test-code-123',roleId:2,count:1,expireTime:'2099-01-01'};
+    for(const fields of [{code:'short'},{count:-1},{count:1.5},{roleId:0},{expireTime:'bad-date'}]) {
+      await expect(regKeys.add({env},{...good,...fields},3)).rejects.toMatchObject({code:400});
+    }
+    vi.spyOn(roles,'selectById').mockResolvedValue(null);
+    await expect(regKeys.add({env},good,3)).rejects.toThrow();
+  });
 });

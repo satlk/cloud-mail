@@ -24,7 +24,15 @@ const loginService = {
 
 	async register(c, params, oauth = false) {
 
-		const { email, password, token, code } = params;
+		if (!params || typeof params !== 'object' || Array.isArray(params)
+            || typeof params.email !== 'string' || params.email.length > 254
+            || typeof params.password !== 'string'
+            || (params.code != null && (typeof params.code !== 'string' || params.code.length > 128))
+            || (params.token != null && (typeof params.token !== 'string' || params.token.length > 8192))) {
+            throw new BizError('注册参数无效', 400);
+        }
+        const { password, token, code } = params;
+        const email = params.email.trim().toLowerCase();
 
 		let { regKey, register, registerVerify, regVerifyCount, minEmailPrefix, emailPrefixFilter } = await settingService.query(c)
 
@@ -126,7 +134,9 @@ const loginService = {
 			}
 		}
 
-		const { salt, hash } = await saltHashUtils.hashPassword(password);
+		if (regKeyId) await regKeyService.consume(c, regKeyId, type);
+
+        const { salt, hash } = await saltHashUtils.hashPassword(password);
 
 		const userId = await userService.insert(c, { email, regKeyId,password: hash, salt, type: type || defType });
 
@@ -134,9 +144,6 @@ const loginService = {
 
 		await userService.updateUserInfo(c, userId, true);
 
-		if (regKey !== settingConst.regKey.CLOSE && type) {
-			await regKeyService.reduceCount(c, code, 1);
-		}
 
 		if (registerVerify === settingConst.registerVerify.COUNT && !regVerifyOpen) {
 			const row = await verifyRecordService.increaseRegCount(c);
@@ -163,7 +170,9 @@ const loginService = {
 			throw new BizError(t('notExistRegKey'));
 		}
 
-		if (regKeyRow.count <= 0) {
+		if (!Number.isInteger(regKeyRow.roleId) || regKeyRow.roleId <= 0) throw new BizError('注册码无效', 400);
+
+        if (regKeyRow.count <= 0) {
 			throw new BizError(t('noRegKeyCount'));
 		}
 
@@ -192,7 +201,7 @@ const loginService = {
 		const today = toUtc().tz('Asia/Shanghai').startOf('day')
 		const expireTime = toUtc(regKeyRow.expireTime).tz('Asia/Shanghai').startOf('day');
 
-		if (regKeyRow.count <= 0 || expireTime.isBefore(today)) {
+		if (!Number.isInteger(regKeyRow.roleId) || regKeyRow.roleId <= 0 || regKeyRow.count <= 0 || expireTime.isBefore(today)) {
 			return null
 		}
 
