@@ -26,3 +26,5 @@ SQLite integrity_check=ok; SHA256 e98f31662683fc9446b275a2b9c2abb3d624bc82b1ebbe
 ## Pending
 DNS edit API returns 403; scoped DNS token file is still absent. SPF/DMARC changes remain pending and are not claimed deployed. Preserve Cloudflare MX/routing and SPF include while tightening policies after authorization. Existing forwarding behavior and third-party sender records require preservation.
 Static traversal in the supplied report did not disclose data; no new confirmed traversal finding. Ordinary-user live IDOR tests require explicitly provisioned test identities; disabled historical test accounts stay disabled. Isolated owner/other-user attachment and send tests pass.
+
+Production registration retest: code object/array -> 400; missing/nonexistent invitation -> 501 business rejection before provisioning. Raw result: F:\AI\codex\软件开发\cloud-mail-security-artifacts\round5-registration-results.json. Existing BizError 501 convention remains for missing/nonexistent codes.
